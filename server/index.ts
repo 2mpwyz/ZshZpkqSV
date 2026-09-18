@@ -7,13 +7,6 @@ import {
   handleFlutterwaveWebhook,
   verifyFlutterwavePayment,
 } from "./routes/flutterwave.js";
-import {
-  completeZohoBooksCallback,
-  disconnectZohoBooks,
-  getZohoBooksData,
-  getZohoBooksStatus,
-  startZohoBooksConnect,
-} from "./routes/zoho-books.js";
 
 export function createServer() {
   const app = express();
@@ -33,11 +26,6 @@ export function createServer() {
   app.post("/api/payments/flutterwave/cancel", cancelFlutterwavePayment);
   app.post("/api/payments/flutterwave/verify", verifyFlutterwavePayment);
   app.post("/api/payments/flutterwave/webhook", handleFlutterwaveWebhook);
-  app.get("/api/zoho/books/connect", startZohoBooksConnect);
-  app.get("/api/zoho/books/callback", completeZohoBooksCallback);
-  app.get("/api/zoho/books/status", getZohoBooksStatus);
-  app.get("/api/zoho/books/data", getZohoBooksData);
-  app.post("/api/zoho/books/disconnect", disconnectZohoBooks);
 
   return app;
 }

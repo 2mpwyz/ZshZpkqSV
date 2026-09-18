@@ -34,7 +34,6 @@ import {
   Heart,
   CheckSquare,
   BarChart3,
-  BookOpen,
   CreditCard,
   AlertCircle,
   CheckCircle2,
@@ -360,17 +359,6 @@ const Header = () => {
       ],
     },
     {
-      title: "Books",
-      items: [
-        {
-          title: "Zoho Books",
-          href: "/books",
-          icon: BookOpen,
-          description: "Connect invoices and accounting data",
-        },
-      ],
-    },
-    {
       title: "Accounts",
       items: [
         {
@@ -433,18 +421,14 @@ const Header = () => {
                                 ? "Task Management"
                                 : section.title === "Reports"
                                   ? "Analytics & Reports"
-                                  : section.title === "Books"
-                                    ? "Connected Accounting"
-                                    : "Account Management"}
+                                  : "Account Management"}
                             </div>
                             <p className="text-sm leading-tight text-white/90">
                               {section.title === "Tasks"
                                 ? "Create and manage work tasks"
                                 : section.title === "Reports"
                                   ? "Track performance and analytics"
-                                  : section.title === "Books"
-                                    ? "Keep Zoho Books connected"
-                                    : "Manage vendors and billing"}
+                                  : "Manage vendors and billing"}
                             </p>
                           </Link>
                         </NavigationMenuLink>
