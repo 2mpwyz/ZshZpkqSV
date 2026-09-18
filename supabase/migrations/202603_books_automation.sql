@@ -24,12 +24,13 @@ create table if not exists public.books_bank_imports (
   status text not null default 'pending' check (status in ('pending', 'processing', 'ready', 'failed', 'completed')),
   error_message text,
   uploaded_by uuid not null references auth.users(id),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  unique (id, organization_id)
 );
 
 create table if not exists public.books_bank_import_rows (
   id uuid primary key default gen_random_uuid(),
-  import_id uuid not null references public.books_bank_imports(id) on delete cascade,
+  import_id uuid not null,
   organization_id uuid not null references public.books_organizations(id) on delete cascade,
   transaction_date date not null,
   description text not null,
@@ -37,19 +38,24 @@ create table if not exists public.books_bank_import_rows (
   currency_code char(3) not null default 'UGX',
   reference text,
   status text not null default 'pending' check (status in ('pending', 'matched', 'posted', 'ignored')),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  foreign key (import_id, organization_id) references public.books_bank_imports(id, organization_id) on delete cascade
 );
 
 create or replace function public.seed_books_tax_rates(target_organization_id uuid)
 returns void language plpgsql security definer set search_path = public
 as $$
 begin
+  if not exists (select 1 from public.books_memberships where organization_id = target_organization_id and user_id = auth.uid()) then
+    raise exception 'Not authorized for this Books organization';
+  end if;
   insert into public.books_tax_rates (organization_id, country_code, name, rate_percentage)
   values (target_organization_id, 'UG', 'URA VAT', 18)
   on conflict (organization_id, name, effective_from) do nothing;
 end;
 $$;
 
+revoke all on function public.seed_books_tax_rates(uuid) from public;
 grant execute on function public.seed_books_tax_rates(uuid) to authenticated;
 
 create or replace function public.apply_books_invoice_tax()
@@ -71,8 +77,8 @@ begin
     new.tax_rate_percentage := selected_rate;
     new.tax_amount := round(new.subtotal * selected_rate / 100, 4);
   else
-    new.tax_rate_percentage := coalesce(new.tax_rate_percentage, 0);
-    new.tax_amount := round(new.subtotal * new.tax_rate_percentage / 100, 4);
+    new.tax_rate_percentage := 0;
+    new.tax_amount := 0;
   end if;
   return new;
 end;
@@ -112,18 +118,22 @@ begin
   if debit_account is null or credit_account is null then raise exception 'Required Books account is missing'; end if;
   insert into public.books_journal_transactions (organization_id, source_type, source_id, transaction_date, description, created_by)
   values (target_organization_id, source_kind, source_uuid, entry_date, entry_description, coalesce(entry_user, (select owner_id from public.books_organizations where id = target_organization_id)))
+  on conflict do nothing
   returning id into transaction_uuid;
+  if transaction_uuid is null then
+    select id into transaction_uuid from public.books_journal_transactions
+    where organization_id = target_organization_id and source_type = source_kind and source_id = source_uuid;
+    return transaction_uuid;
+  end if;
   insert into public.books_journal_lines (transaction_id, account_id, debit, currency_code)
   values (transaction_uuid, debit_account, entry_amount, entry_currency);
   insert into public.books_journal_lines (transaction_id, account_id, credit, currency_code)
   values (transaction_uuid, credit_account, entry_amount, entry_currency);
   return transaction_uuid;
-exception when unique_violation then
-  select id into transaction_uuid from public.books_journal_transactions
-  where organization_id = target_organization_id and source_type = source_kind and source_id = source_uuid;
-  return transaction_uuid;
 end;
 $$;
+
+revoke all on function public.post_books_journal_entry(uuid, text, uuid, date, text, text, text, numeric, char, uuid) from public;
 
 create or replace function public.post_books_paid_invoice()
 returns trigger language plpgsql security definer set search_path = public
@@ -154,6 +164,10 @@ drop trigger if exists books_expense_post on public.books_expenses;
 create trigger books_expense_post
 after insert on public.books_expenses
 for each row execute function public.post_books_expense();
+
+revoke all on function public.apply_books_invoice_tax() from public;
+revoke all on function public.post_books_paid_invoice() from public;
+revoke all on function public.post_books_expense() from public;
 
 alter table public.books_tax_rates enable row level security;
 alter table public.books_bank_imports enable row level security;
