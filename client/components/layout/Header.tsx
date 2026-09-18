@@ -34,6 +34,7 @@ import {
   Heart,
   CheckSquare,
   BarChart3,
+  BookOpen,
   CreditCard,
   AlertCircle,
   CheckCircle2,
@@ -359,6 +360,17 @@ const Header = () => {
       ],
     },
     {
+      title: "Books",
+      items: [
+        {
+          title: "Accounting workspace",
+          href: "/books",
+          icon: BookOpen,
+          description: "Customers, invoices, expenses, and reports",
+        },
+      ],
+    },
+    {
       title: "Accounts",
       items: [
         {
@@ -421,14 +433,18 @@ const Header = () => {
                                 ? "Task Management"
                                 : section.title === "Reports"
                                   ? "Analytics & Reports"
-                                  : "Account Management"}
+                                  : section.title === "Books"
+                                    ? "Business finances"
+                                    : "Account Management"}
                             </div>
                             <p className="text-sm leading-tight text-white/90">
                               {section.title === "Tasks"
                                 ? "Create and manage work tasks"
                                 : section.title === "Reports"
                                   ? "Track performance and analytics"
-                                  : "Manage vendors and billing"}
+                                  : section.title === "Books"
+                                    ? "Run your books from one secure workspace"
+                                    : "Manage vendors and billing"}
                             </p>
                           </Link>
                         </NavigationMenuLink>

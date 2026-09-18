@@ -30,6 +30,7 @@ import ForgotPasswordPage from "./pages/ForgotPasswordPage";
 import TasksPage from "./pages/TasksPage";
 import ReportsPage from "./pages/ReportsPage";
 import AccountsPage from "./pages/AccountsPage";
+import BooksPage from "./pages/BooksPage";
 import ReviewsPage from "./pages/ReviewsPage";
 import ConciergePage from "./pages/ConciergePage";
 import OffersPage from "./pages/OffersPage";
@@ -156,6 +157,7 @@ function App() {
               <Route path="/reports/tasks" element={<ReportsPage />} />
               <Route path="/reports/performance" element={<ReportsPage />} />
               <Route path="/reports/vendors" element={<ReportsPage />} />
+              <Route path="/books" element={<BooksPage />} />
               <Route path="/accounts/*" element={<AccountsPage />} />
               <Route path="/accounts/vendors" element={<AccountsPage />} />
               <Route path="/accounts/quotes" element={<AccountsPage />} />
