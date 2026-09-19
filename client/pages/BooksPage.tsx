@@ -97,7 +97,8 @@ const BooksPage = () => {
   const assets = ledgerTotal("asset", "debit") - ledgerTotal("asset", "credit");
   const liabilities = ledgerTotal("liability", "credit") - ledgerTotal("liability", "debit");
   const equity = ledgerTotal("equity", "credit") - ledgerTotal("equity", "debit") + revenue - expensesTotal;
-  const receivable = invoices.filter((invoice) => invoice.status !== "paid" && invoice.status !== "void").reduce((sum, invoice) => sum + Number(invoice.total), 0);
+  const openInvoices = invoices.filter((invoice) => invoice.status !== "paid" && invoice.status !== "void");
+  const receivable = openInvoices.reduce((sum, invoice) => sum + Number(invoice.total), 0);
   const overdue = invoices.filter((invoice) => invoice.status === "overdue" || (invoice.status !== "paid" && invoice.due_date < today)).length;
   const contactName = (id: string | null) => contacts.find((contact) => contact.id === id)?.name || "Unassigned";
   const profit = revenue - expensesTotal;
@@ -142,7 +143,7 @@ const BooksPage = () => {
   const markLatestInvoicePaid = async () => {
     const invoice = invoices.find((item) => item.status !== "paid" && item.status !== "void");
     if (!invoice) {
-      toast({ title: "No open invoice", description: "Create an invoice first." });
+      toast({ title: "All invoices are already paid", description: "Create a new draft invoice to test the paid-invoice workflow." });
       return;
     }
     setSaving(true);
@@ -163,7 +164,7 @@ const BooksPage = () => {
       <div className="container max-w-7xl py-8">
         <div className="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-end">
           <div><div className="mb-3 flex items-center gap-2"><BookOpen className="h-7 w-7 text-sheraton-gold" /><Badge className="bg-sheraton-gold text-sheraton-navy">Books</Badge></div><h1 className="text-4xl font-bold text-sheraton-navy">Your business finances</h1><p className="mt-2 max-w-2xl text-muted-foreground">Customers, invoices, expenses and financial reports in one secure workspace. Your records stay in your platform and are isolated by business.</p></div>
-          <div className="flex gap-2"><Button variant="outline" onClick={() => void loadBooks()}><RefreshCw className="mr-2 h-4 w-4" />Refresh</Button><Button variant="outline" onClick={() => void markLatestInvoicePaid()} disabled={saving}>Mark open invoice paid</Button></div>
+          <div className="flex gap-2"><Button variant="outline" onClick={() => void loadBooks()}><RefreshCw className="mr-2 h-4 w-4" />Refresh</Button><Button variant="outline" onClick={() => void markLatestInvoicePaid()} disabled={saving || openInvoices.length === 0}>{openInvoices.length ? "Mark open invoice paid" : "All invoices paid"}</Button></div>
         </div>
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
           <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-6"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="contacts">Contacts</TabsTrigger><TabsTrigger value="invoices">Invoices</TabsTrigger><TabsTrigger value="expenses">Expenses</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="accounts">Chart of accounts</TabsTrigger></TabsList>
