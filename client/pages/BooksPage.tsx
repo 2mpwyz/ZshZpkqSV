@@ -139,6 +139,23 @@ const BooksPage = () => {
     await loadBooks();
   };
 
+  const markLatestInvoicePaid = async () => {
+    const invoice = invoices.find((item) => item.status !== "paid" && item.status !== "void");
+    if (!invoice) {
+      toast({ title: "No open invoice", description: "Create an invoice first." });
+      return;
+    }
+    setSaving(true);
+    const { error } = await supabase.from("books_invoices").update({ status: "paid" }).eq("id", invoice.id).eq("organization_id", organizationId);
+    setSaving(false);
+    if (error) {
+      toast({ title: "Could not mark invoice paid", description: error.message, variant: "destructive" });
+      return;
+    }
+    toast({ title: "Invoice marked paid", description: "The ledger trigger and paid-invoice webhook can now process it." });
+    await loadBooks();
+  };
+
   if (loading) return <div className="min-h-screen bg-sheraton-cream/30 p-8"><div className="mx-auto max-w-7xl animate-pulse space-y-6"><div className="h-12 rounded bg-muted" /><div className="h-40 rounded bg-muted" /><div className="h-64 rounded bg-muted" /></div></div>;
 
   return (
@@ -146,7 +163,7 @@ const BooksPage = () => {
       <div className="container max-w-7xl py-8">
         <div className="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-end">
           <div><div className="mb-3 flex items-center gap-2"><BookOpen className="h-7 w-7 text-sheraton-gold" /><Badge className="bg-sheraton-gold text-sheraton-navy">Books</Badge></div><h1 className="text-4xl font-bold text-sheraton-navy">Your business finances</h1><p className="mt-2 max-w-2xl text-muted-foreground">Customers, invoices, expenses and financial reports in one secure workspace. Your records stay in your platform and are isolated by business.</p></div>
-          <Button variant="outline" onClick={() => void loadBooks()}><RefreshCw className="mr-2 h-4 w-4" />Refresh</Button>
+          <div className="flex gap-2"><Button variant="outline" onClick={() => void loadBooks()}><RefreshCw className="mr-2 h-4 w-4" />Refresh</Button><Button variant="outline" onClick={() => void markLatestInvoicePaid()} disabled={saving}>Mark open invoice paid</Button></div>
         </div>
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
           <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-6"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="contacts">Contacts</TabsTrigger><TabsTrigger value="invoices">Invoices</TabsTrigger><TabsTrigger value="expenses">Expenses</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="accounts">Chart of accounts</TabsTrigger></TabsList>

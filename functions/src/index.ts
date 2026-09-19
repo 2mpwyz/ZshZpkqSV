@@ -31,10 +31,13 @@ const b2 = () => new S3Client({
 
 const bucket = () => required("B2_BUCKET_NAME");
 
-function verifyWebhook(request: Parameters<typeof onRequest>[0] extends never ? never : any, rawBody: Buffer): void {
+function verifyWebhook(request: any, rawBody: Buffer): void {
   const secret = process.env.SUPABASE_WEBHOOK_SECRET;
   if (!secret) throw new Error("SUPABASE_WEBHOOK_SECRET is not configured");
   const signature = request.header("x-supabase-webhook-signature");
+  const configuredSecret = request.header("x-webhook-secret");
+  const authorization = request.header("authorization");
+  if (configuredSecret === secret || authorization === `Bearer ${secret}`) return;
   if (!signature) throw new Error("Missing webhook signature");
   const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
   const provided = Buffer.from(signature, "utf8");
