@@ -230,7 +230,10 @@ async function sendBrevoEmail(recipient: string, subject: string, pdf: Buffer, f
       attachment: [{ name: fileName.split("/").pop(), content: pdf.toString("base64") }],
     }),
   });
-  if (!response.ok) throw new Error("Brevo rejected the email");
+  if (!response.ok) {
+    const details = (await response.text()).slice(0, 1500);
+    throw new Error(`Brevo rejected the email (${response.status}): ${details}`);
+  }
 }
 
 async function updateDeliveryAudit(client: ReturnType<typeof supabase>, correlationIdValue: string, values: Record<string, unknown>): Promise<void> {
