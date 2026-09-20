@@ -31,6 +31,31 @@ type LedgerLine = { account_id: string; debit: number; credit: number; currency_
 const today = new Date().toISOString().slice(0, 10);
 const formatMoney = (value: number, currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 0 }).format(value || 0);
 
+type SupabaseErrorLike = { code?: string | null; message?: string | null; details?: string | null; hint?: string | null };
+type BooksOperation = "books.load" | "books.contact.save" | "books.invoice.save" | "books.expense.save" | "books.invoice.markPaid";
+
+const newCorrelationId = () => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `books-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const sanitizeDiagnosticValue = (value: unknown) => typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 500) : value;
+const reportBooksError = (operation: BooksOperation, correlationId: string, organizationId: string | null, recordId: string | null, error: SupabaseErrorLike) => {
+  console.error("Books operation failed", {
+    operation,
+    correlationId,
+    organizationId,
+    recordId,
+    supabase: {
+      code: sanitizeDiagnosticValue(error.code),
+      message: sanitizeDiagnosticValue(error.message),
+      details: sanitizeDiagnosticValue(error.details),
+      hint: sanitizeDiagnosticValue(error.hint),
+    },
+  });
+};
+const operationToast = (title: string, correlationId: string) => ({ title, description: `Please try again. If the problem continues, share reference ${correlationId} with support.`, variant: "destructive" as const });
+
 const BooksPage = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -50,37 +75,57 @@ const BooksPage = () => {
   const [expenseForm, setExpenseForm] = useState({ description: "", contact_id: "", expense_date: today, amount: "", tax_amount: "" });
 
   const loadBooks = async () => {
+    const operation: BooksOperation = "books.load";
+    const correlationId = newCorrelationId();
     setLoading(true);
-    const { data: userData } = await supabase.auth.getUser();
-    if (!userData.user) {
-      navigate(`/login?returnTo=${encodeURIComponent("/books")}`, { replace: true });
-      return;
-    }
-    const { data: orgId, error: orgError } = await supabase.rpc("get_or_create_books_organization");
-    if (orgError) {
-      toast({ title: "Books needs its database setup", description: orgError.message, variant: "destructive" });
+    try {
+      const { data: userData, error: authError } = await supabase.auth.getUser();
+      if (authError) {
+        reportBooksError(operation, correlationId, organizationId, null, authError);
+        toast(operationToast("Books could not verify your session", correlationId));
+        return;
+      }
+      if (!userData.user) {
+        navigate(`/login?returnTo=${encodeURIComponent("/books")}`, { replace: true });
+        return;
+      }
+      const { data: orgId, error: orgError } = await supabase.rpc("get_or_create_books_organization");
+      if (orgError || !orgId) {
+        if (orgError) reportBooksError(operation, correlationId, null, null, orgError);
+        toast(operationToast("Books could not initialize your workspace", correlationId));
+        return;
+      }
+      setOrganizationId(orgId);
+      const [org, contactResult, invoiceResult, expenseResult, accountResult, taxResult, transactionResult] = await Promise.all([
+        supabase.from("books_organizations").select("base_currency").eq("id", orgId).single(),
+        supabase.from("books_contacts").select("id,name,type,email,tax_id").eq("organization_id", orgId).order("name"),
+        supabase.from("books_invoices").select("id,invoice_number,contact_id,issue_date,due_date,currency_code,subtotal,tax_amount,total,status").eq("organization_id", orgId).order("issue_date", { ascending: false }),
+        supabase.from("books_expenses").select("id,description,contact_id,expense_date,currency_code,amount,tax_amount,payment_status").eq("organization_id", orgId).order("expense_date", { ascending: false }),
+        supabase.from("books_accounts").select("id,code,name,type").eq("organization_id", orgId).order("code"),
+        supabase.from("books_tax_rates").select("id,name,country_code,rate_percentage").eq("organization_id", orgId).eq("is_active", true).order("name"),
+        supabase.from("books_journal_transactions").select("id,transaction_date,books_journal_lines(account_id,debit,credit,currency_code)").eq("organization_id", orgId).order("transaction_date", { ascending: false }),
+      ]);
+      const results = [org, contactResult, invoiceResult, expenseResult, accountResult, taxResult, transactionResult];
+      const failedResult = results.find((result) => result.error);
+      if (failedResult?.error) {
+        reportBooksError(operation, correlationId, orgId, null, failedResult.error);
+        toast(operationToast("Books could not refresh your records", correlationId));
+        return;
+      }
+      if (org.data?.base_currency) setCurrency(org.data.base_currency.trim());
+      setContacts((contactResult.data || []) as Contact[]);
+      setInvoices((invoiceResult.data || []) as Invoice[]);
+      setExpenses((expenseResult.data || []) as Expense[]);
+      setAccounts((accountResult.data || []) as Account[]);
+      setTaxRates((taxResult.data || []) as TaxRate[]);
+      const transactions = (transactionResult.data || []) as Array<{ id: string; transaction_date: string; books_journal_lines: Array<{ account_id: string; debit: number; credit: number; currency_code: string }> }>;
+      setLedgerLines(transactions.flatMap((transaction) => transaction.books_journal_lines.map((line) => ({ ...line, transaction_date: transaction.transaction_date }))));
+    } catch (error) {
+      reportBooksError(operation, correlationId, organizationId, null, error as SupabaseErrorLike);
+      toast(operationToast("Books could not refresh your records", correlationId));
+    } finally {
       setLoading(false);
-      return;
     }
-    setOrganizationId(orgId);
-    const [org, contactResult, invoiceResult, expenseResult, accountResult, taxResult, transactionResult] = await Promise.all([
-      supabase.from("books_organizations").select("base_currency").eq("id", orgId).single(),
-      supabase.from("books_contacts").select("id,name,type,email,tax_id").eq("organization_id", orgId).order("name"),
-      supabase.from("books_invoices").select("id,invoice_number,contact_id,issue_date,due_date,currency_code,subtotal,tax_amount,total,status").eq("organization_id", orgId).order("issue_date", { ascending: false }),
-      supabase.from("books_expenses").select("id,description,contact_id,expense_date,currency_code,amount,tax_amount,payment_status").eq("organization_id", orgId).order("expense_date", { ascending: false }),
-      supabase.from("books_accounts").select("id,code,name,type").eq("organization_id", orgId).order("code"),
-      supabase.from("books_tax_rates").select("id,name,country_code,rate_percentage").eq("organization_id", orgId).eq("is_active", true).order("name"),
-      supabase.from("books_journal_transactions").select("id,transaction_date,books_journal_lines(account_id,debit,credit,currency_code)").eq("organization_id", orgId).order("transaction_date", { ascending: false }),
-    ]);
-    if (org.data?.base_currency) setCurrency(org.data.base_currency.trim());
-    setContacts((contactResult.data || []) as Contact[]);
-    setInvoices((invoiceResult.data || []) as Invoice[]);
-    setExpenses((expenseResult.data || []) as Expense[]);
-    setAccounts((accountResult.data || []) as Account[]);
-    setTaxRates((taxResult.data || []) as TaxRate[]);
-    const transactions = (transactionResult.data || []) as Array<{ id: string; transaction_date: string; books_journal_lines: Array<{ account_id: string; debit: number; credit: number; currency_code: string }> }>;
-    setLedgerLines(transactions.flatMap((transaction) => transaction.books_journal_lines.map((line) => ({ ...line, transaction_date: transaction.transaction_date }))));
-    setLoading(false);
   };
 
   useEffect(() => { void loadBooks(); }, []);
@@ -106,55 +151,100 @@ const BooksPage = () => {
   const saveContact = async (event: FormEvent) => {
     event.preventDefault();
     if (!organizationId || !contactForm.name.trim()) return;
+    const operation: BooksOperation = "books.contact.save";
+    const correlationId = newCorrelationId();
     setSaving(true);
-    const { error } = await supabase.from("books_contacts").insert({ organization_id: organizationId, name: contactForm.name.trim(), type: contactForm.type, email: contactForm.email.trim() || null, tax_id: contactForm.tax_id.trim() || null });
-    setSaving(false);
-    if (error) { toast({ title: "Could not save contact", description: error.message, variant: "destructive" }); return; }
-    setContactForm({ name: "", type: "customer", email: "", tax_id: "" });
-    toast({ title: "Contact added" });
-    await loadBooks();
+    try {
+      const { error } = await supabase.from("books_contacts").insert({ organization_id: organizationId, name: contactForm.name.trim(), type: contactForm.type, email: contactForm.email.trim() || null, tax_id: contactForm.tax_id.trim() || null });
+      if (error) {
+        reportBooksError(operation, correlationId, organizationId, null, error);
+        toast(operationToast("Could not save contact", correlationId));
+        return;
+      }
+      setContactForm({ name: "", type: "customer", email: "", tax_id: "" });
+      toast({ title: "Contact added" });
+      await loadBooks();
+    } catch (error) {
+      reportBooksError(operation, correlationId, organizationId, null, error as SupabaseErrorLike);
+      toast(operationToast("Could not save contact", correlationId));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const saveInvoice = async (event: FormEvent) => {
     event.preventDefault();
     if (!organizationId || !invoiceForm.invoice_number.trim() || !invoiceForm.subtotal) return;
+    const operation: BooksOperation = "books.invoice.save";
+    const correlationId = newCorrelationId();
     setSaving(true);
-    const selectedRate = taxRates.find((rate) => rate.id === invoiceForm.tax_rate_id);
-    const { error } = await supabase.from("books_invoices").insert({ organization_id: organizationId, invoice_number: invoiceForm.invoice_number.trim(), contact_id: invoiceForm.contact_id || null, issue_date: invoiceForm.issue_date, due_date: invoiceForm.due_date, currency_code: currency, subtotal: Number(invoiceForm.subtotal), tax_rate_id: invoiceForm.tax_rate_id || null, tax_rate_percentage: selectedRate?.rate_percentage || 0, status: "draft" });
-    setSaving(false);
-    if (error) { toast({ title: "Could not save invoice", description: error.message, variant: "destructive" }); return; }
-    setInvoiceForm({ invoice_number: "", contact_id: "", issue_date: today, due_date: today, subtotal: "", tax_rate_id: "" });
-    toast({ title: "Invoice saved", description: "The invoice is ready to review and send." });
-    await loadBooks();
+    try {
+      const selectedRate = taxRates.find((rate) => rate.id === invoiceForm.tax_rate_id);
+      const { error } = await supabase.from("books_invoices").insert({ organization_id: organizationId, invoice_number: invoiceForm.invoice_number.trim(), contact_id: invoiceForm.contact_id || null, issue_date: invoiceForm.issue_date, due_date: invoiceForm.due_date, currency_code: currency, subtotal: Number(invoiceForm.subtotal), tax_rate_id: invoiceForm.tax_rate_id || null, tax_rate_percentage: selectedRate?.rate_percentage || 0, status: "draft" });
+      if (error) {
+        reportBooksError(operation, correlationId, organizationId, null, error);
+        toast(operationToast("Could not save invoice", correlationId));
+        return;
+      }
+      setInvoiceForm({ invoice_number: "", contact_id: "", issue_date: today, due_date: today, subtotal: "", tax_rate_id: "" });
+      toast({ title: "Invoice saved", description: "The invoice is ready to review and send." });
+      await loadBooks();
+    } catch (error) {
+      reportBooksError(operation, correlationId, organizationId, null, error as SupabaseErrorLike);
+      toast(operationToast("Could not save invoice", correlationId));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const saveExpense = async (event: FormEvent) => {
     event.preventDefault();
     if (!organizationId || !expenseForm.description.trim() || !expenseForm.amount) return;
+    const operation: BooksOperation = "books.expense.save";
+    const correlationId = newCorrelationId();
     setSaving(true);
-    const { error } = await supabase.from("books_expenses").insert({ organization_id: organizationId, description: expenseForm.description.trim(), contact_id: expenseForm.contact_id || null, expense_date: expenseForm.expense_date, currency_code: currency, amount: Number(expenseForm.amount), tax_amount: Number(expenseForm.tax_amount || 0), payment_status: "paid" });
-    setSaving(false);
-    if (error) { toast({ title: "Could not save expense", description: error.message, variant: "destructive" }); return; }
-    setExpenseForm({ description: "", contact_id: "", expense_date: today, amount: "", tax_amount: "" });
-    toast({ title: "Expense recorded" });
-    await loadBooks();
+    try {
+      const { error } = await supabase.from("books_expenses").insert({ organization_id: organizationId, description: expenseForm.description.trim(), contact_id: expenseForm.contact_id || null, expense_date: expenseForm.expense_date, currency_code: currency, amount: Number(expenseForm.amount), tax_amount: Number(expenseForm.tax_amount || 0), payment_status: "paid" });
+      if (error) {
+        reportBooksError(operation, correlationId, organizationId, null, error);
+        toast(operationToast("Could not save expense", correlationId));
+        return;
+      }
+      setExpenseForm({ description: "", contact_id: "", expense_date: today, amount: "", tax_amount: "" });
+      toast({ title: "Expense recorded" });
+      await loadBooks();
+    } catch (error) {
+      reportBooksError(operation, correlationId, organizationId, null, error as SupabaseErrorLike);
+      toast(operationToast("Could not save expense", correlationId));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const markLatestInvoicePaid = async () => {
     const invoice = invoices.find((item) => item.status !== "paid" && item.status !== "void");
-    if (!invoice) {
+    if (!invoice || !organizationId) {
       toast({ title: "All invoices are already paid", description: "Create a new draft invoice to test the paid-invoice workflow." });
       return;
     }
+    const operation: BooksOperation = "books.invoice.markPaid";
+    const correlationId = newCorrelationId();
     setSaving(true);
-    const { error } = await supabase.from("books_invoices").update({ status: "paid" }).eq("id", invoice.id).eq("organization_id", organizationId);
-    setSaving(false);
-    if (error) {
-      toast({ title: "Could not mark invoice paid", description: error.message, variant: "destructive" });
-      return;
+    try {
+      const { error } = await supabase.from("books_invoices").update({ status: "paid" }).eq("id", invoice.id).eq("organization_id", organizationId);
+      if (error) {
+        reportBooksError(operation, correlationId, organizationId, invoice.id, error);
+        toast(operationToast("Could not mark invoice paid", correlationId));
+        return;
+      }
+      toast({ title: "Invoice marked paid", description: "The ledger trigger and paid-invoice webhook can now process it." });
+      await loadBooks();
+    } catch (error) {
+      reportBooksError(operation, correlationId, organizationId, invoice.id, error as SupabaseErrorLike);
+      toast(operationToast("Could not mark invoice paid", correlationId));
+    } finally {
+      setSaving(false);
     }
-    toast({ title: "Invoice marked paid", description: "The ledger trigger and paid-invoice webhook can now process it." });
-    await loadBooks();
   };
 
   if (loading) return <div className="min-h-screen bg-sheraton-cream/30 p-8"><div className="mx-auto max-w-7xl animate-pulse space-y-6"><div className="h-12 rounded bg-muted" /><div className="h-40 rounded bg-muted" /><div className="h-64 rounded bg-muted" /></div></div>;

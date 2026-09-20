@@ -66,6 +66,7 @@ declare
   delivery_id uuid;
   request_id bigint;
   dedupe_value text;
+  correlation_value uuid;
 begin
   if new.status = 'paid'
      and (
@@ -74,7 +75,9 @@ begin
      ) then
     begin
       dedupe_value := 'invoice_paid:' || new.id::text;
+      correlation_value := gen_random_uuid();
       webhook_body := jsonb_build_object(
+        'correlationId', correlation_value::text,
         'type', tg_op,
         'table', tg_table_name,
         'schema', tg_table_schema,
@@ -90,6 +93,7 @@ begin
         invoice_id,
         organization_id,
         event_type,
+        correlation_id,
         dedupe_key,
         sanitized_payload,
         attempt_count,
@@ -99,6 +103,7 @@ begin
         new.id,
         new.organization_id,
         'invoice.paid',
+        correlation_value,
         dedupe_value,
         webhook_body,
         1,
@@ -110,7 +115,10 @@ begin
       if delivery_id is not null then
         select net.http_post(
           url := 'https://us-central1-speshio.cloudfunctions.net/generateAndSendInvoicePDF',
-          headers := jsonb_build_object('Content-Type', 'application/json'),
+          headers := jsonb_build_object(
+            'Content-Type', 'application/json',
+            'X-Webhook-Secret', 'REPLACE_WITH_YOUR_NEW_WEBHOOK_SECRET'
+          ),
           body := webhook_body,
           timeout_milliseconds := 10000
         ) into request_id;

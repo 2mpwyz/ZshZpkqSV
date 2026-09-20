@@ -233,6 +233,15 @@ async function sendBrevoEmail(recipient: string, subject: string, pdf: Buffer, f
   if (!response.ok) throw new Error("Brevo rejected the email");
 }
 
+async function updateDeliveryAudit(client: ReturnType<typeof supabase>, correlationIdValue: string, values: Record<string, unknown>): Promise<void> {
+  try {
+    const { error } = await client.from("books_invoice_webhook_deliveries").update(values).eq("correlation_id", correlationIdValue);
+    if (error) logStage("supabase_reads", correlationIdValue, { operation: "delivery_audit_update", updateFailed: true, code: error.code });
+  } catch {
+    logStage("supabase_reads", correlationIdValue, { operation: "delivery_audit_update", updateFailed: true });
+  }
+}
+
 async function updateInvoice(client: ReturnType<typeof supabase>, invoiceId: string, values: Record<string, unknown>): Promise<void> {
   const { error } = await client.from("books_invoices").update(values).eq("id", invoiceId).eq("status", "paid");
   if (!error) return;
@@ -302,7 +311,7 @@ export const generateAndSendInvoicePDF = onRequest({ region: "us-central1", time
     logStage("supabase_reads", correlation, { operation: "invoice_delivery", invoiceId });
     activeStage = "pdf";
     const document = await createInvoicePdf(invoiceId);
-    logStage("pdf", correlation, { invoiceId });
+    logStage("pdf", correlation, { invoiceId, organizationId: document.organizationId });
     const client = supabase();
     activeStage = "supabase_reads";
     const { data: current, error: currentError } = await client.from("books_invoices").select("receipt_storage_key").eq("id", invoiceId).eq("status", "paid").single();
@@ -311,33 +320,36 @@ export const generateAndSendInvoicePDF = onRequest({ region: "us-central1", time
     const storageKey = current.receipt_storage_key || document.fileName;
     if (!current.receipt_storage_key) {
       activeStage = "b2";
-      logStage("b2", correlation, { invoiceId, action: "put" });
+      logStage("b2", correlation, { invoiceId, organizationId: document.organizationId, action: "put" });
       await b2().send(new PutObjectCommand({ Bucket: bucket(), Key: storageKey, Body: document.buffer, ContentType: "application/pdf" }));
     } else {
-      logStage("b2", correlation, { invoiceId, action: "reuse" });
+      logStage("b2", correlation, { invoiceId, organizationId: document.organizationId, action: "reuse" });
     }
     const publicUrl = process.env.B2_PUBLIC_URL ? `${process.env.B2_PUBLIC_URL.replace(/\/$/, "")}/${storageKey}` : null;
     activeStage = "receipt_update";
-    logStage("receipt_update", correlation, { invoiceId });
+    logStage("receipt_update", correlation, { invoiceId, organizationId: document.organizationId });
     await updateInvoice(client, invoiceId, { receipt_url: publicUrl, receipt_storage_key: storageKey, receipt_delivery_status: "queued", receipt_delivery_error: null, receipt_delivery_attempted_at: new Date().toISOString() });
     if (deliveryState?.receipt_delivery_status === "sent") {
       response.json({ ok: true, invoiceId, storageKey, skippedEmail: true, correlationId: correlation });
       return;
     }
     activeStage = "brevo";
-    logStage("brevo", correlation, { invoiceId });
+    logStage("brevo", correlation, { invoiceId, organizationId: document.organizationId });
     await sendBrevoEmail(document.recipient, document.subject, document.buffer, storageKey);
     await updateInvoice(client, invoiceId, { receipt_delivery_status: "sent", receipt_delivery_error: null, receipt_delivery_attempted_at: new Date().toISOString() });
+    await updateDeliveryAudit(client, correlation, { status: "sent", sent_at: new Date().toISOString(), updated_at: new Date().toISOString() });
     response.json({ ok: true, invoiceId, storageKey, correlationId: correlation });
   } catch (error) {
     const failureError = (error as { envelope?: ErrorEnvelope }).envelope ? error as { envelope: ErrorEnvelope } : failure(activeStage, correlation, error);
+    const client = supabase();
     if (payload.record?.id) {
       try {
-        await updateInvoice(supabase(), payload.record.id, { receipt_delivery_status: "failed", receipt_delivery_error: safeError(error), receipt_delivery_attempted_at: new Date().toISOString() });
+        await updateInvoice(client, payload.record.id, { receipt_delivery_status: "failed", receipt_delivery_error: safeError(error), receipt_delivery_attempted_at: new Date().toISOString() });
       } catch {
         logStage("receipt_update", correlation, { operation: "invoice_failed_update", invoiceId: payload.record.id, updateFailed: true });
       }
     }
+    await updateDeliveryAudit(client, correlation, { status: "failed", sanitized_error: safeError(error), updated_at: new Date().toISOString() });
     response.status(failureError.envelope.retryable ? 500 : 400).json(failureError.envelope);
   }
 });
