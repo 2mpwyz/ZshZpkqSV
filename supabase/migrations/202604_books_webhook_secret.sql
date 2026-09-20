@@ -1,4 +1,4 @@
-create extension if not exists vault with schema vault;
+create extension if not exists supabase_vault with schema vault;
 
 create or replace function public.send_paid_invoice_pdf_webhook()
 returns trigger
