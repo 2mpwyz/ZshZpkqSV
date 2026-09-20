@@ -180,10 +180,19 @@ const BooksPage = () => {
     setSaving(true);
     try {
       const selectedRate = taxRates.find((rate) => rate.id === invoiceForm.tax_rate_id);
-      const { error } = await supabase.from("books_invoices").insert({ organization_id: organizationId, invoice_number: invoiceForm.invoice_number.trim(), contact_id: invoiceForm.contact_id || null, issue_date: invoiceForm.issue_date, due_date: invoiceForm.due_date, currency_code: currency, subtotal: Number(invoiceForm.subtotal), tax_rate_id: invoiceForm.tax_rate_id || null, tax_rate_percentage: selectedRate?.rate_percentage || 0, status: "draft" });
-      if (error) {
-        reportBooksError(operation, correlationId, organizationId, null, error);
+      const invoiceNumber = invoiceForm.invoice_number.trim();
+      const subtotal = Number(invoiceForm.subtotal);
+      const { data: invoice, error } = await supabase.from("books_invoices").insert({ organization_id: organizationId, invoice_number: invoiceNumber, contact_id: invoiceForm.contact_id || null, issue_date: invoiceForm.issue_date, due_date: invoiceForm.due_date, currency_code: currency, subtotal, tax_rate_id: invoiceForm.tax_rate_id || null, tax_rate_percentage: selectedRate?.rate_percentage || 0, status: "draft" }).select("id").single();
+      if (error || !invoice) {
+        reportBooksError(operation, correlationId, organizationId, null, error || { message: "Invoice was not returned after creation" });
         toast(operationToast("Could not save invoice", correlationId));
+        return;
+      }
+      const { error: lineError } = await supabase.from("books_invoice_lines").insert({ invoice_id: invoice.id, organization_id: organizationId, description: `Invoice ${invoiceNumber}`, quantity: 1, unit_price: subtotal });
+      if (lineError) {
+        reportBooksError(operation, correlationId, organizationId, invoice.id, lineError);
+        await supabase.from("books_invoices").delete().eq("id", invoice.id).eq("organization_id", organizationId);
+        toast(operationToast("Could not save invoice line", correlationId));
         return;
       }
       setInvoiceForm({ invoice_number: "", contact_id: "", issue_date: today, due_date: today, subtotal: "", tax_rate_id: "" });
