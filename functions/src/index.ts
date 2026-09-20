@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { parse } from "csv-parse";
@@ -7,8 +7,10 @@ import PDFDocument from "pdfkit";
 import { createClient } from "@supabase/supabase-js";
 
 type BankRecord = Record<string, string>;
-type InvoicePayload = { record?: { id?: string; status?: string }; old_record?: { status?: string } };
-type ImportPayload = { importId?: string; organizationId?: string; storageKey?: string; fileUrl?: string };
+type InvoicePayload = { record?: { id?: string; status?: string; organization_id?: string }; old_record?: { status?: string }; correlationId?: string; correlation_id?: string };
+type ImportPayload = { importId?: string; organizationId?: string; storageKey?: string; fileUrl?: string; correlationId?: string; correlation_id?: string };
+type Stage = "validation" | "supabase_reads" | "pdf" | "b2" | "receipt_update" | "brevo";
+type ErrorEnvelope = { ok: false; stage: Stage; retryable: boolean; correlationId: string; error: string };
 
 const required = (name: string): string => {
   const value = process.env[name];
@@ -33,7 +35,7 @@ const bucket = () => required("B2_BUCKET_NAME");
 
 function verifyWebhook(request: any, rawBody: Buffer): void {
   const secret = process.env.SUPABASE_WEBHOOK_SECRET;
-  if (!secret) throw new Error("SUPABASE_WEBHOOK_SECRET is not configured");
+  if (!secret) throw new Error("Webhook authentication is not configured");
   const signature = request.header("x-supabase-webhook-signature");
   const configuredSecret = request.header("x-webhook-secret");
   const authorization = request.header("authorization");
@@ -52,6 +54,36 @@ function jsonBody(request: any): { value: unknown; raw: Buffer } {
     ? request.rawBody
     : Buffer.from(JSON.stringify(request.body ?? {}));
   return { value: request.body ?? JSON.parse(raw.toString("utf8")), raw };
+}
+
+function correlationId(request: any, payload: unknown): string {
+  const body = payload as { correlationId?: unknown; correlation_id?: unknown };
+  const header = request.header("x-correlation-id") || request.header("x-request-id");
+  const candidate = body?.correlationId || body?.correlation_id || header;
+  return typeof candidate === "string" && candidate.length <= 128 ? candidate : randomUUID();
+}
+
+function logStage(stage: Stage, correlationIdValue: string, details: Record<string, unknown> = {}): void {
+  console.info(JSON.stringify({ service: "books", stage, correlationId: correlationIdValue, ...details }));
+}
+
+function safeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "Books operation failed";
+  return message
+    .replace(/(SUPABASE_SERVICE_ROLE_KEY|B2_APPLICATION_KEY|BREVO_API_KEY|SUPABASE_WEBHOOK_SECRET)=[^\s,;]+/gi, "$1=[redacted]")
+    .slice(0, 2000);
+}
+
+function retryableFor(stage: Stage, error: unknown): boolean {
+  if (stage === "validation" || stage === "pdf") return false;
+  const message = safeError(error).toLowerCase();
+  return !message.includes("not found") && !message.includes("missing") && !message.includes("invalid");
+}
+
+function failure(stage: Stage, correlationIdValue: string, error: unknown): Error & { envelope: ErrorEnvelope } {
+  const result = new Error(safeError(error)) as Error & { envelope: ErrorEnvelope };
+  result.envelope = { ok: false, stage, retryable: retryableFor(stage, error), correlationId: correlationIdValue, error: stage === "validation" ? safeError(error) : "Books operation failed" };
+  return result;
 }
 
 function normalizeHeader(header: string): string {
@@ -74,7 +106,7 @@ function parseDate(value: string | undefined): string {
   if (!value) throw new Error("Bank row is missing a transaction date");
   const trimmed = value.trim();
   const date = new Date(trimmed);
-  if (Number.isNaN(date.getTime())) throw new Error(`Invalid transaction date: ${value}`);
+  if (Number.isNaN(date.getTime())) throw new Error("Invalid transaction date");
   return date.toISOString().slice(0, 10);
 }
 
@@ -93,7 +125,7 @@ async function readImportFile(payload: ImportPayload): Promise<Buffer> {
   const url = new URL(payload.fileUrl);
   if (!allowedHosts.includes(url.hostname)) throw new Error("fileUrl is not an approved B2 URL");
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`Could not download bank file (${response.status})`);
+  if (!response.ok) throw new Error("Could not download bank file");
   return Buffer.from(await response.arrayBuffer());
 }
 
@@ -142,16 +174,21 @@ async function insertBankRows(importId: string, organizationId: string, csv: Buf
   return count;
 }
 
-async function createInvoicePdf(invoiceId: string): Promise<{ buffer: Buffer; fileName: string; recipient: string; subject: string }> {
+type InvoiceDocument = { buffer: Buffer; fileName: string; recipient: string; subject: string; invoiceNumber: string; organizationId: string };
+
+async function createInvoicePdf(invoiceId: string): Promise<InvoiceDocument> {
   const client = supabase();
-  const { data: invoice, error: invoiceError } = await client.from("books_invoices").select("id,invoice_number,issue_date,due_date,currency_code,subtotal,tax_amount,total,organization_id,contact_id").eq("id", invoiceId).single();
+  const { data: invoice, error: invoiceError } = await client.from("books_invoices").select("id,invoice_number,issue_date,due_date,currency_code,subtotal,tax_amount,total,organization_id,contact_id,receipt_storage_key").eq("id", invoiceId).single();
   if (invoiceError || !invoice) throw invoiceError || new Error("Invoice not found");
   if (!invoice.contact_id) throw new Error("Paid invoice has no customer contact");
-  const [{ data: organization }, { data: contact }, { data: lines }] = await Promise.all([
+  const [{ data: organization, error: organizationError }, { data: contact, error: contactError }, { data: lines, error: linesError }] = await Promise.all([
     client.from("books_organizations").select("name,base_currency").eq("id", invoice.organization_id).single(),
     client.from("books_contacts").select("name,email,tax_id").eq("id", invoice.contact_id).single(),
     client.from("books_invoice_lines").select("description,quantity,unit_price,line_total").eq("invoice_id", invoice.id).order("created_at"),
   ]);
+  if (organizationError) throw organizationError;
+  if (contactError) throw contactError;
+  if (linesError) throw linesError;
   if (!contact?.email) throw new Error("Invoice customer has no email address");
 
   const document = new PDFDocument({ margin: 50 });
@@ -178,7 +215,7 @@ async function createInvoicePdf(invoiceId: string): Promise<{ buffer: Buffer; fi
   document.text(`Tax: ${invoice.tax_amount} ${invoice.currency_code}`, { align: "right" });
   document.fontSize(13).text(`Total: ${invoice.total} ${invoice.currency_code}`, { align: "right" });
   document.end();
-  return { buffer: await completed, fileName: `books/invoices/${invoice.organization_id}/${invoice.invoice_number}.pdf`, recipient: contact.email, subject: `Your Invoice Receipt - ${invoice.invoice_number}` };
+  return { buffer: await completed, fileName: invoice.receipt_storage_key || `books/invoices/${invoice.organization_id}/${invoice.invoice_number}.pdf`, recipient: contact.email, subject: `Your Invoice Receipt - ${invoice.invoice_number}`, invoiceNumber: invoice.invoice_number, organizationId: invoice.organization_id };
 }
 
 async function sendBrevoEmail(recipient: string, subject: string, pdf: Buffer, fileName: string): Promise<void> {
@@ -193,73 +230,114 @@ async function sendBrevoEmail(recipient: string, subject: string, pdf: Buffer, f
       attachment: [{ name: fileName.split("/").pop(), content: pdf.toString("base64") }],
     }),
   });
-  if (!response.ok) throw new Error(`Brevo rejected the email (${response.status})`);
+  if (!response.ok) throw new Error("Brevo rejected the email");
 }
 
-const runtimeSecrets = [
-  "SUPABASE_URL",
-  "SUPABASE_SERVICE_ROLE_KEY",
-  "SUPABASE_WEBHOOK_SECRET",
-  "B2_ENDPOINT",
-  "B2_REGION",
-  "B2_KEY_ID",
-  "B2_APPLICATION_KEY",
-  "B2_BUCKET_NAME",
-  "B2_PUBLIC_URL",
-  "BREVO_API_KEY",
-  "BREVO_SENDER_EMAIL",
-  "BREVO_SENDER_NAME",
-];
+async function updateInvoice(client: ReturnType<typeof supabase>, invoiceId: string, values: Record<string, unknown>): Promise<void> {
+  const { error } = await client.from("books_invoices").update(values).eq("id", invoiceId).eq("status", "paid");
+  if (!error) return;
+  if (Object.keys(values).some((key) => key.startsWith("receipt_delivery_"))) {
+    const legacyValues = Object.fromEntries(Object.entries(values).filter(([key]) => !key.startsWith("receipt_delivery_")));
+    const { error: legacyError } = await client.from("books_invoices").update(legacyValues).eq("id", invoiceId).eq("status", "paid");
+    if (!legacyError) return;
+  }
+  throw error;
+}
+
+const runtimeSecrets = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_WEBHOOK_SECRET", "B2_ENDPOINT", "B2_REGION", "B2_KEY_ID", "B2_APPLICATION_KEY", "B2_BUCKET_NAME", "B2_PUBLIC_URL", "BREVO_API_KEY", "BREVO_SENDER_EMAIL", "BREVO_SENDER_NAME"];
 
 export const importBankCSV = onRequest({ region: "us-central1", timeoutSeconds: 540, memory: "1GiB", secrets: runtimeSecrets }, async (request, response) => {
+  const { value, raw } = jsonBody(request);
+  const correlation = correlationId(request, value);
+  const payload = value as ImportPayload;
   if (request.method !== "POST") {
-    response.status(405).json({ error: "POST required" });
+    response.status(405).json({ ok: false, stage: "validation", retryable: false, correlationId: correlation, error: "POST required" });
     return;
   }
-  const { value, raw } = jsonBody(request);
+  let activeStage: Stage = "validation";
   try {
+    logStage("validation", correlation, { operation: "import" });
     verifyWebhook(request, raw);
-    const payload = value as ImportPayload;
-    if (!payload.importId || !payload.organizationId) throw new Error("importId and organizationId are required");
+    if (!payload.importId || !payload.organizationId) throw failure("validation", correlation, new Error("importId and organizationId are required"));
     const client = supabase();
-    await client.from("books_bank_imports").update({ status: "processing", error_message: null }).eq("id", payload.importId).eq("organization_id", payload.organizationId);
+    activeStage = "supabase_reads";
+    logStage("supabase_reads", correlation, { operation: "import", importId: payload.importId });
+    const processing = await client.from("books_bank_imports").update({ status: "processing", error_message: null }).eq("id", payload.importId).eq("organization_id", payload.organizationId);
+    if (processing.error) throw failure("supabase_reads", correlation, processing.error);
+    activeStage = "b2";
     const rows = await insertBankRows(payload.importId, payload.organizationId, await readImportFile(payload));
-    await client.from("books_bank_imports").update({ status: "ready" }).eq("id", payload.importId).eq("organization_id", payload.organizationId);
-    response.json({ ok: true, rows });
-    return;
+    activeStage = "receipt_update";
+    const ready = await client.from("books_bank_imports").update({ status: "ready" }).eq("id", payload.importId).eq("organization_id", payload.organizationId);
+    if (ready.error) throw failure("receipt_update", correlation, ready.error);
+    logStage("receipt_update", correlation, { operation: "import_ready", importId: payload.importId });
+    response.json({ ok: true, rows, correlationId: correlation });
   } catch (error) {
-    const payload = value as ImportPayload;
-    if (payload.importId && payload.organizationId) await supabase().from("books_bank_imports").update({ status: "failed", error_message: error instanceof Error ? error.message : "Import failed" }).eq("id", payload.importId).eq("organization_id", payload.organizationId);
-    response.status(400).json({ error: error instanceof Error ? error.message : "Import failed" });
-    return;
+    const failureError = (error as { envelope?: ErrorEnvelope }).envelope ? error as { envelope: ErrorEnvelope } : failure(activeStage, correlation, error);
+    if (payload.importId && payload.organizationId) {
+      const failed = await supabase().from("books_bank_imports").update({ status: "failed", error_message: safeError(error) }).eq("id", payload.importId).eq("organization_id", payload.organizationId);
+      if (failed.error) logStage("receipt_update", correlation, { operation: "import_failed_update", importId: payload.importId, updateFailed: true });
+    }
+    response.status(failureError.envelope.retryable ? 500 : 400).json(failureError.envelope);
   }
 });
 
 export const generateAndSendInvoicePDF = onRequest({ region: "us-central1", timeoutSeconds: 120, memory: "512MiB", secrets: runtimeSecrets }, async (request, response) => {
+  const { value, raw } = jsonBody(request);
+  const correlation = correlationId(request, value);
+  const payload = value as InvoicePayload;
   if (request.method !== "POST") {
-    response.status(405).json({ error: "POST required" });
+    response.status(405).json({ ok: false, stage: "validation", retryable: false, correlationId: correlation, error: "POST required" });
     return;
   }
-  const { value, raw } = jsonBody(request);
+  let activeStage: Stage = "validation";
   try {
+    logStage("validation", correlation, { operation: "invoice_delivery" });
     verifyWebhook(request, raw);
-    const payload = value as InvoicePayload;
     const invoiceId = payload.record?.id;
     if (!invoiceId || payload.record?.status !== "paid" || payload.old_record?.status === "paid") {
-      response.json({ ok: true, skipped: true });
+      response.json({ ok: true, skipped: true, correlationId: correlation });
       return;
     }
+    activeStage = "supabase_reads";
+    logStage("supabase_reads", correlation, { operation: "invoice_delivery", invoiceId });
+    activeStage = "pdf";
     const document = await createInvoicePdf(invoiceId);
-    await b2().send(new PutObjectCommand({ Bucket: bucket(), Key: document.fileName, Body: document.buffer, ContentType: "application/pdf" }));
-    const publicUrl = process.env.B2_PUBLIC_URL ? `${process.env.B2_PUBLIC_URL.replace(/\/$/, "")}/${document.fileName}` : null;
+    logStage("pdf", correlation, { invoiceId });
     const client = supabase();
-    const { error } = await client.from("books_invoices").update({ receipt_url: publicUrl, receipt_storage_key: document.fileName }).eq("id", invoiceId).eq("status", "paid");
-    if (error) throw error;
-    await sendBrevoEmail(document.recipient, document.subject, document.buffer, document.fileName);
-    response.json({ ok: true, invoiceId, storageKey: document.fileName });
-    return;
+    activeStage = "supabase_reads";
+    const { data: current, error: currentError } = await client.from("books_invoices").select("receipt_storage_key").eq("id", invoiceId).eq("status", "paid").single();
+    if (currentError || !current) throw failure("supabase_reads", correlation, currentError || new Error("Invoice not found"));
+    const { data: deliveryState } = await client.from("books_invoices").select("receipt_delivery_status").eq("id", invoiceId).eq("status", "paid").maybeSingle();
+    const storageKey = current.receipt_storage_key || document.fileName;
+    if (!current.receipt_storage_key) {
+      activeStage = "b2";
+      logStage("b2", correlation, { invoiceId, action: "put" });
+      await b2().send(new PutObjectCommand({ Bucket: bucket(), Key: storageKey, Body: document.buffer, ContentType: "application/pdf" }));
+    } else {
+      logStage("b2", correlation, { invoiceId, action: "reuse" });
+    }
+    const publicUrl = process.env.B2_PUBLIC_URL ? `${process.env.B2_PUBLIC_URL.replace(/\/$/, "")}/${storageKey}` : null;
+    activeStage = "receipt_update";
+    logStage("receipt_update", correlation, { invoiceId });
+    await updateInvoice(client, invoiceId, { receipt_url: publicUrl, receipt_storage_key: storageKey, receipt_delivery_status: "queued", receipt_delivery_error: null, receipt_delivery_attempted_at: new Date().toISOString() });
+    if (deliveryState?.receipt_delivery_status === "sent") {
+      response.json({ ok: true, invoiceId, storageKey, skippedEmail: true, correlationId: correlation });
+      return;
+    }
+    activeStage = "brevo";
+    logStage("brevo", correlation, { invoiceId });
+    await sendBrevoEmail(document.recipient, document.subject, document.buffer, storageKey);
+    await updateInvoice(client, invoiceId, { receipt_delivery_status: "sent", receipt_delivery_error: null, receipt_delivery_attempted_at: new Date().toISOString() });
+    response.json({ ok: true, invoiceId, storageKey, correlationId: correlation });
   } catch (error) {
-    response.status(400).json({ error: error instanceof Error ? error.message : "Invoice delivery failed" });
-    return;
+    const failureError = (error as { envelope?: ErrorEnvelope }).envelope ? error as { envelope: ErrorEnvelope } : failure(activeStage, correlation, error);
+    if (payload.record?.id) {
+      try {
+        await updateInvoice(supabase(), payload.record.id, { receipt_delivery_status: "failed", receipt_delivery_error: safeError(error), receipt_delivery_attempted_at: new Date().toISOString() });
+      } catch {
+        logStage("receipt_update", correlation, { operation: "invoice_failed_update", invoiceId: payload.record.id, updateFailed: true });
+      }
+    }
+    response.status(failureError.envelope.retryable ? 500 : 400).json(failureError.envelope);
   }
 });
