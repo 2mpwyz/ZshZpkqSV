@@ -1,0 +1,25 @@
+{
+  "name": "empowise-functions",
+  "private": true,
+  "engines": {
+    "node": "22"
+  },
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "serve": "firebase emulators:start --only functions",
+    "deploy": "npm run build && firebase deploy --only functions"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.750.0",
+    "csv-parse": "^5.6.0",
+    "firebase-functions": "^6.3.2",
+    "pdfkit": "^0.16.0",
+    "@supabase/supabase-js": "^2.104.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/pdfkit": "^0.13.7",
+    "typescript": "^5.5.3"
+  }
+}

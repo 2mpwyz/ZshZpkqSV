@@ -363,10 +363,10 @@ const Header = () => {
       title: "Books",
       items: [
         {
-          title: "Zoho Books",
+          title: "Accounting workspace",
           href: "/books",
           icon: BookOpen,
-          description: "Connect invoices and accounting data",
+          description: "Customers, invoices, expenses, and reports",
         },
       ],
     },
@@ -434,7 +434,7 @@ const Header = () => {
                                 : section.title === "Reports"
                                   ? "Analytics & Reports"
                                   : section.title === "Books"
-                                    ? "Connected Accounting"
+                                    ? "Business finances"
                                     : "Account Management"}
                             </div>
                             <p className="text-sm leading-tight text-white/90">
@@ -443,7 +443,7 @@ const Header = () => {
                                 : section.title === "Reports"
                                   ? "Track performance and analytics"
                                   : section.title === "Books"
-                                    ? "Keep Zoho Books connected"
+                                    ? "Run your books from one secure workspace"
                                     : "Manage vendors and billing"}
                             </p>
                           </Link>
