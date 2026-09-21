@@ -174,7 +174,11 @@ async function insertBankRows(importId: string, organizationId: string, csv: Buf
   return count;
 }
 
-type InvoiceDocument = { buffer: Buffer; fileName: string; recipient: string; subject: string; invoiceNumber: string; organizationId: string };
+type InvoiceDocument = { buffer: Buffer; fileName: string; recipient: string | null; subject: string; invoiceNumber: string; organizationId: string };
+
+function isValidEmail(value: string | null | undefined): value is string {
+  return Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()));
+}
 
 async function createInvoicePdf(invoiceId: string): Promise<InvoiceDocument> {
   const client = supabase();
@@ -189,7 +193,6 @@ async function createInvoicePdf(invoiceId: string): Promise<InvoiceDocument> {
   if (organizationError) throw organizationError;
   if (contactError) throw contactError;
   if (linesError) throw linesError;
-  if (!contact?.email) throw new Error("Invoice customer has no email address");
 
   const document = new PDFDocument({ margin: 50 });
   const chunks: Buffer[] = [];
@@ -215,7 +218,7 @@ async function createInvoicePdf(invoiceId: string): Promise<InvoiceDocument> {
   document.text(`Tax: ${invoice.tax_amount} ${invoice.currency_code}`, { align: "right" });
   document.fontSize(13).text(`Total: ${invoice.total} ${invoice.currency_code}`, { align: "right" });
   document.end();
-  return { buffer: await completed, fileName: invoice.receipt_storage_key || `books/invoices/${invoice.organization_id}/${invoice.invoice_number}.pdf`, recipient: contact.email, subject: `Your Invoice Receipt - ${invoice.invoice_number}`, invoiceNumber: invoice.invoice_number, organizationId: invoice.organization_id };
+  return { buffer: await completed, fileName: invoice.receipt_storage_key || `books/invoices/${invoice.organization_id}/${invoice.invoice_number}.pdf`, recipient: isValidEmail(contact?.email) ? contact.email.trim() : null, subject: `Your Invoice Receipt - ${invoice.invoice_number}`, invoiceNumber: invoice.invoice_number, organizationId: invoice.organization_id };
 }
 
 async function sendBrevoEmail(recipient: string, subject: string, pdf: Buffer, fileName: string): Promise<void> {
@@ -333,6 +336,13 @@ export const generateAndSendInvoicePDF = onRequest({ region: "us-central1", time
     logStage("receipt_update", correlation, { invoiceId, organizationId: document.organizationId });
     await updateInvoice(client, invoiceId, { receipt_url: publicUrl, receipt_storage_key: storageKey, receipt_delivery_status: "queued", receipt_delivery_error: null, receipt_delivery_attempted_at: new Date().toISOString() });
     if (deliveryState?.receipt_delivery_status === "sent") {
+      response.json({ ok: true, invoiceId, storageKey, skippedEmail: true, correlationId: correlation });
+      return;
+    }
+    if (!document.recipient) {
+      const deliveryMessage = "Receipt PDF stored; customer email is missing or invalid";
+      await updateInvoice(client, invoiceId, { receipt_delivery_status: "skipped", receipt_delivery_error: deliveryMessage, receipt_delivery_attempted_at: new Date().toISOString() });
+      await updateDeliveryAudit(client, correlation, { status: "skipped", sanitized_error: deliveryMessage, sent_at: new Date().toISOString(), updated_at: new Date().toISOString() });
       response.json({ ok: true, invoiceId, storageKey, skippedEmail: true, correlationId: correlation });
       return;
     }
