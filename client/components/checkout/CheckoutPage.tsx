@@ -256,11 +256,11 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       usePoints,
     });
     setIsRedirecting(true);
-    if (window.top !== window.self) {
-      const paymentWindow = window.open(paymentSession.paymentUrl, "_blank", "noopener,noreferrer");
-      if (!paymentWindow) window.location.assign(paymentSession.paymentUrl);
+    // Leave the app as a full-document navigation so the provider owns the viewport.
+    if (window.top && window.top !== window.self) {
+      window.top.location.replace(paymentSession.paymentUrl);
     } else {
-      window.location.assign(paymentSession.paymentUrl);
+      window.location.replace(paymentSession.paymentUrl);
     }
   };
 
