@@ -39,6 +39,7 @@ const RegisterPage: React.FC = () => {
     serviceCategory: "" as "internal" | "external" | "",
     menuAccessRole: "none" as "none" | "chef" | "food_beverage_manager",
     // Personal Information
+    organizationName: "",
     firstName: "",
     lastName: "",
     email: "",
@@ -104,6 +105,9 @@ const RegisterPage: React.FC = () => {
     }
 
     if (currentStep === "info") {
+      if (formData.role === "manager" && !formData.organizationName.trim()) {
+        newErrors.organizationName = "Organization name is required for managers";
+      }
       if (!formData.firstName.trim())
         newErrors.firstName = "First name is required";
       if (!formData.lastName.trim())
@@ -159,6 +163,7 @@ const RegisterPage: React.FC = () => {
         password: formData.password,
         options: {
           data: {
+            organization_name: formData.role === "manager" ? formData.organizationName : null,
             first_name: formData.firstName,
             last_name: formData.lastName,
             phone: formData.phone,
@@ -185,6 +190,7 @@ const RegisterPage: React.FC = () => {
       // 2. Complete the profile immediately when a session is available.
       const profileData: Record<string, any> = {
         user_id: authData.user.id,
+        organization_name: formData.role === "manager" ? formData.organizationName.trim() : null,
         first_name: formData.firstName,
         last_name: formData.lastName,
         email: formData.email,
@@ -413,6 +419,19 @@ const RegisterPage: React.FC = () => {
           Join the Sheraton Special family and unlock exclusive privileges
         </p>
       </div>
+
+      {formData.role === "manager" && (
+        <div>
+          <label className="block text-sm font-medium mb-2">Organization Name *</label>
+          <Input
+            value={formData.organizationName}
+            onChange={(e) => setFormData((prev) => ({ ...prev, organizationName: e.target.value }))}
+            className={errors.organizationName ? "border-red-500" : ""}
+            placeholder="Hotel, restaurant, or organization name"
+          />
+          {errors.organizationName && <p className="text-red-500 text-sm mt-1">{errors.organizationName}</p>}
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 gap-4">
         <div>

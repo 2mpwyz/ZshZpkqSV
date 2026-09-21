@@ -77,6 +77,7 @@ const ServicesProfilePage = () => {
 
   // User data from database
   const [userData, setUserData] = useState({
+    organizationName: "",
     firstName: "",
     lastName: "",
     email: "",
@@ -112,7 +113,8 @@ const ServicesProfilePage = () => {
     saveTimeoutsRef.current[fieldName] = setTimeout(async () => {
       try {
         const dbFieldName = fieldName === 'firstName' ? 'first_name' :
-                           fieldName === 'lastName' ? 'last_name' : fieldName;
+                           fieldName === 'lastName' ? 'last_name' :
+                           fieldName === 'organizationName' ? 'organization_name' : fieldName;
 
         await supabase
           .from("user_profiles")
@@ -155,6 +157,7 @@ const ServicesProfilePage = () => {
             .from("user_profiles")
             .insert({
               user_id: user.id,
+              organization_name: metadata.organization_name || null,
               email: user.email || "",
               first_name: metadata.first_name || "",
               last_name: metadata.last_name || "",
@@ -180,6 +183,7 @@ const ServicesProfilePage = () => {
         setUserRole(resolvedRole);
         setUserData((prev) => ({
           ...prev,
+          organizationName: resolvedProfile?.organization_name || metadata.organization_name || "",
           firstName: resolvedProfile?.first_name || metadata.first_name || "",
           lastName: resolvedProfile?.last_name || metadata.last_name || "",
           email: user.email || "",
@@ -1147,6 +1151,20 @@ const ServicesProfilePage = () => {
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {userRole === 'manager' && (
+                    <div className="space-y-2 md:col-span-2">
+                      <Label htmlFor="organizationName">Organization Name *</Label>
+                      <Input
+                        id="organizationName"
+                        value={userData.organizationName}
+                        onChange={(e) => {
+                          setUserData({ ...userData, organizationName: e.target.value });
+                          saveFieldToDatabase("organizationName", e.target.value);
+                        }}
+                        disabled={!isEditing}
+                      />
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <Label htmlFor="firstName">First Name *</Label>
                     <Input

@@ -276,8 +276,14 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
         return;
       }
 
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Please sign in before placing an order.");
+      let { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        const { data: anonymousSession, error: anonymousError } = await supabase.auth.signInAnonymously();
+        if (anonymousError || !anonymousSession.user) {
+          throw new Error("Guest checkout is currently unavailable. Please sign in and try again.");
+        }
+        user = anonymousSession.user;
+      }
 
       const currency = getCurrency();
       if (!currency) throw new Error("Please checkout items in the same currency.");
